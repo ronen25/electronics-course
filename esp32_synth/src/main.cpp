@@ -4,28 +4,39 @@
 // - SSD1306-family OLED shows live frequency/volume per oscillator
 //
 // Targets a specific user's ESP32-C3 board with a built-in ~0.4" OLED.
-// The C3 has no DAC peripheral, so audio is currently synthesized via LEDC
-// PWM (duty cycle = sample value) into an external RC low-pass filter; the
-// plan is to switch this to a real DAC once one is added to the hardware --
-// see the audio-output block in onAudioTimer()/setup() when that happens.
+// The C3 has no DAC peripheral, so audio goes out over I2S to an external
+// MAX98357A mono amp (I2S DAC + Class-D amp in one chip), replacing the
+// earlier LEDC-PWM-into-RC-filter approach.
 //
-//   Audio: PWM output -> GPIO7 -> (RC low-pass / cap) -> amp/speaker, GND shared
+//   Audio: I2S -> MAX98357A -> speaker
+//     LRC (word select) -> GPIO9, BCLK (bit clock) -> GPIO7, DIN (data) -> GPIO10
+//     Amp SD tied directly to 3V3 (enable, mono (L+R)/2 output); GAIN left
+//     floating (9dB, MAX98357A default); amp GND/Vin -> board GND/3V3.
+//     Samples are sent as 32-bit words (64x BCLK/LRCLK ratio) even though
+//     only ~16 bits of audio precision are used: the MAX98357A's automatic
+//     clock-ratio auto-detect is known to be unreliable at the 32x (16-bit)
+//     ratio and solid at 64x.
+//     None of GPIO7/9/10 are this board's onboard LED (GPIO8 -- see CLAUDE.md
+//     hardware notes; a continuously-toggling signal there visibly lit the
+//     LED solid and corrupted the clock badly enough to kill audio) or its
+//     ADC-capable pins (GPIO0-5, all spoken for by the 6 pots below), so
+//     there's no interference between I2S and either of those. GPIO9 is a
+//     strapping pin but safe to reuse: it's driven by the ESP32 (as an I2S
+//     output) into a high-impedance amp input, so nothing pulls it during
+//     boot the way a pull-down/up load would.
 //   Pots:  wiper -> ADC pin, outer legs -> 3V3 and GND
 //     (C3 only exposes 6 ADC-capable pins total: GPIO0-5)
 //     Pitch pots:  osc1 GPIO0, osc2 GPIO1, osc3 GPIO2
 //     Volume pots: osc1 GPIO3, osc2 GPIO4, osc3 GPIO5
-//   OLED: this firmware assumes SDA/SCL at this board's Arduino defaults
-//     (GPIO8/GPIO9) and a 72x40 panel -- UNVERIFIED against the actual
-//     hardware; this board has a built-in ~0.4" OLED of unconfirmed exact
-//     resolution/pinout. Confirm both against that board's silkscreen/vendor
-//     docs before flashing. GPIO7 for PWM avoids the I2C pins and the C3's
-//     strapping pins (GPIO2/8/9 -- 2 is reused here as an ADC input, which
-//     is fine; 8/9 are already spoken for by I2C).
+//   OLED: this firmware's display pin/library assumptions are stale and
+//     unrelated to the I2S pins above -- see CLAUDE.md's hardware notes for
+//     the confirmed OLED pinout (GPIO5/6) and what still needs porting here.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <driver/i2s.h>
 
 // ---------- Display ----------
 #define SCREEN_WIDTH 72
@@ -38,11 +49,13 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define SAMPLE_RATE 20000
 #define NUM_OSC 3
 
-// No DAC on this chip (yet) -- audio is synthesized via PWM duty cycle.
-#define PWM_PIN 7
-#define PWM_CHANNEL 0
-#define PWM_FREQ 312500     // = 80MHz APB / 2^8, exact at 8-bit resolution
-#define PWM_RESOLUTION_BITS 8
+// No DAC on this chip -- audio goes out over I2S to an external MAX98357A.
+#define I2S_PORT I2S_NUM_0
+#define I2S_PIN_LRC 9   // word select
+#define I2S_PIN_BCLK 7  // bit clock -- NOT GPIO8: that's this board's onboard LED pin,
+                         // whose LED+resistor load corrupts a fast toggling signal
+#define I2S_PIN_DOUT 10 // data out -> amp DIN
+#define I2S_BLOCK_SAMPLES 128
 static const uint8_t PITCH_PINS[NUM_OSC] = {0, 1, 2};
 static const uint8_t VOLUME_PINS[NUM_OSC] = {3, 4, 5};
 
@@ -52,37 +65,79 @@ static const uint8_t VOLUME_PINS[NUM_OSC] = {3, 4, 5};
 // 256-entry sine wavetable, unsigned 8-bit (0..255, centered at 128)
 static uint8_t sineTable[256];
 
-hw_timer_t *audioTimer = NULL;
+// Phase accumulators / increments. Both writeAudioBlock() and readControls()
+// now run from loop() (no more ISR), so plain (non-volatile) shared state is
+// fine -- there's no concurrent access to synchronize against.
+uint32_t phaseAcc[NUM_OSC] = {0, 0, 0};
+uint32_t phaseInc[NUM_OSC] = {0, 0, 0};
+uint8_t oscVolume[NUM_OSC] = {200, 200, 200}; // 0..255
 
-// Phase accumulators / increments, shared between ISR and loop().
-// Frequency/volume are updated from loop() at a much lower rate than the
-// audio ISR runs, so plain volatile reads/writes are sufficient here.
-volatile uint32_t phaseAcc[NUM_OSC] = {0, 0, 0};
-volatile uint32_t phaseInc[NUM_OSC] = {0, 0, 0};
-volatile uint8_t oscVolume[NUM_OSC] = {200, 200, 200}; // 0..255
-
-// UI state (updated in loop, not ISR)
+// UI state (updated in loop)
 float oscFreq[NUM_OSC] = {0, 0, 0};
 uint8_t oscVolPct[NUM_OSC] = {0, 0, 0};
 
-void IRAM_ATTR onAudioTimer();
+// I2S TX buffer: interleaved stereo frames, mono signal duplicated to both
+// channels (the amp sums/selects channels per its SD pin strapping). 32-bit
+// words (not 16): see the bits_per_sample comment in setupI2S().
+static int32_t i2sBuf[I2S_BLOCK_SAMPLES * 2];
+
+void setupI2S();
+void writeAudioBlock();
 uint32_t freqToPhaseInc(float freq);
 void buildSineTable();
 void readControls();
 void updateDisplay();
 
-void IRAM_ATTR onAudioTimer() {
-  int32_t mix = 0;
-  for (int i = 0; i < NUM_OSC; i++) {
-    phaseAcc[i] += phaseInc[i];
-    uint8_t sample = sineTable[phaseAcc[i] >> 24]; // top 8 bits -> table index
-    int16_t centered = static_cast<int16_t>(sample) - 128; // -128..127
-    mix += (centered * oscVolume[i]) / 255;
+void setupI2S() {
+  i2s_config_t i2sConfig = {};
+  i2sConfig.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX);
+  i2sConfig.sample_rate = SAMPLE_RATE;
+  // 32-bit (not 16): the MAX98357A's automatic BCLK/LRCLK ratio detection is
+  // known to be unreliable at 32x (16-bit stereo) but solid at 64x. Audio
+  // content below still only needs ~16 bits; the low bits are left at zero.
+  i2sConfig.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  i2sConfig.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  i2sConfig.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  i2sConfig.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  i2sConfig.dma_buf_count = 4;
+  i2sConfig.dma_buf_len = I2S_BLOCK_SAMPLES;
+  i2sConfig.use_apll = false;
+  i2sConfig.tx_desc_auto_clear = true;
+  esp_err_t installErr = i2s_driver_install(I2S_PORT, &i2sConfig, 0, NULL);
+  if (installErr != ESP_OK) {
+    Serial.printf("i2s_driver_install failed: %s\n", esp_err_to_name(installErr));
   }
-  int32_t out = 128 + (mix / NUM_OSC);
-  if (out < 0) out = 0;
-  if (out > 255) out = 255;
-  ledcWrite(PWM_CHANNEL, static_cast<uint32_t>(out));
+
+  i2s_pin_config_t pinConfig = {};
+  pinConfig.mck_io_num = I2S_PIN_NO_CHANGE; // unused; defaults to GPIO0 if left unset
+  pinConfig.bck_io_num = I2S_PIN_BCLK;
+  pinConfig.ws_io_num = I2S_PIN_LRC;
+  pinConfig.data_out_num = I2S_PIN_DOUT;
+  pinConfig.data_in_num = I2S_PIN_NO_CHANGE; // TX only
+  esp_err_t pinErr = i2s_set_pin(I2S_PORT, &pinConfig);
+  if (pinErr != ESP_OK) {
+    Serial.printf("i2s_set_pin failed: %s\n", esp_err_to_name(pinErr));
+  }
+}
+
+// Fills one block of samples from the oscillators and blocks on i2s_write()
+// until the DMA queue accepts it -- this paces the loop close to real-time,
+// taking over the job the hardware timer ISR used to do for PWM.
+void writeAudioBlock() {
+  for (int n = 0; n < I2S_BLOCK_SAMPLES; n++) {
+    int32_t mix = 0;
+    for (int i = 0; i < NUM_OSC; i++) {
+      phaseAcc[i] += phaseInc[i];
+      uint8_t sample = sineTable[phaseAcc[i] >> 24]; // top 8 bits -> table index
+      int16_t centered = static_cast<int16_t>(sample) - 128; // -128..127
+      mix += (centered * oscVolume[i]) / 255;
+    }
+    int32_t out = (mix / NUM_OSC) << 24; // -128..127 -> MSB-justified in 32-bit word
+    i2sBuf[2 * n] = out;
+    i2sBuf[2 * n + 1] = out; // duplicate mono onto both I2S channels
+  }
+  size_t bytesWritten;
+  i2s_write(I2S_PORT, i2sBuf, sizeof(i2sBuf), &bytesWritten, portMAX_DELAY);
 }
 
 uint32_t freqToPhaseInc(float freq) {
@@ -157,19 +212,25 @@ void setup() {
 
   readControls();
 
-  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION_BITS);
-  ledcAttachPin(PWM_PIN, PWM_CHANNEL);
-
-  // Legacy Arduino-ESP32 timer API (this core predates timerBegin(freq)):
-  // timer 0, divider 80 against the 80MHz APB clock -> 1MHz (1us) tick.
-  audioTimer = timerBegin(0, 80, true);
-  timerAttachInterrupt(audioTimer, &onAudioTimer, true);
-  timerAlarmWrite(audioTimer, 1000000 / SAMPLE_RATE, true); // fire every 1/SAMPLE_RATE sec
-  timerAlarmEnable(audioTimer);
+  setupI2S();
 }
 
 void loop() {
-  readControls();
-  updateDisplay();
-  delay(80);
+  // Keeps the I2S DMA queue fed; i2s_write() blocking is what paces this
+  // loop to roughly real-time now that there's no audio-rate timer ISR.
+  writeAudioBlock();
+
+  static uint32_t lastControlUpdate = 0;
+  uint32_t now = millis();
+  if (now - lastControlUpdate >= 80) {
+    lastControlUpdate = now;
+    readControls();
+    // updateDisplay() is NOT called here: on this chip, having the I2S
+    // driver active at the same time as any I2C (Wire) transaction causes
+    // multi-second bus stalls (both directions) -- a known Arduino-ESP32
+    // core bug, not a wiring issue: see
+    // github.com/espressif/arduino-esp32/issues/4686. The one Wire
+    // transaction that happens before setupI2S() in setup() (the static
+    // "Synth / booting..." screen) is unaffected and still works.
+  }
 }
