@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/modernist-5c3b4d97-fbc5-4918-9650-00737dcc430b/styles.css">
+<script src="_ds/modernist-5c3b4d97-fbc5-4918-9650-00737dcc430b/_ds_bundle.js"></script>
+<style>
+body { margin: 0; background: var(--color-bg); color: var(--color-text); }
+.mstep { width: 16px; height: 16px; border: 1.5px solid var(--color-divider); background: var(--color-bg); padding: 0; cursor: pointer; }
+.mstep.on { background: var(--color-accent); border-color: var(--color-accent); }
+.mstep.accent-beat { border-color: var(--color-neutral-700); }
+.range-wrap { position: relative; width: 60px; height: 14px; display: flex; align-items: center; }
+.range-track { position: absolute; left: 0; right: 0; height: 3px; background: var(--color-divider); pointer-events: none; }
+.mini-range { position: relative; z-index: 1; width: 60px; accent-color: var(--color-accent); margin: 0; -webkit-appearance: none; appearance: none; background: transparent; height: 14px; }
+.mini-range::-webkit-slider-runnable-track { height: 3px; background: transparent; }
+.mini-range::-moz-range-track { height: 3px; background: transparent; }
+.mini-range::-webkit-slider-thumb { -webkit-appearance: none; width: 10px; height: 10px; border-radius: 50%; background: var(--color-accent); margin-top: -3.5px; }
+.mini-range::-moz-range-thumb { width: 10px; height: 10px; border: none; border-radius: 50%; background: var(--color-accent); }
+.mini-label { font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.6; white-space: nowrap; }
+.mseg { display: flex; border: 1.5px solid var(--color-divider); }
+.mseg-opt { font-size: 10px; padding: 2px 6px; cursor: pointer; user-select: none; }
+.mseg-opt.active { background: var(--color-accent); color: #fff; }
+.osc-strip { display: grid; grid-template-columns: 56px 92px 195px 1fr; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; border-top: 2px solid var(--color-divider); }
+</style>
+</helmet>
+<div style="width: 844px; height: 390px; background: var(--color-bg); padding: var(--space-3) var(--space-4); display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden;">
+
+  <div style="display: flex; align-items: center; gap: var(--space-4); padding-bottom: var(--space-2); border-bottom: 2px solid var(--color-divider);">
+    <div style="font-family: var(--font-heading); font-size: 15px; font-weight: 700;">DRUM&#8202;·&#8202;C3</div>
+    <span class="tag tag-outline" style="font-size: 9px; padding: 2px 5px;">ESP32-C3</span>
+    <button type="button" class="btn btn-primary" style="min-width: 64px; padding: 4px 10px; font-size: 12px;">Play</button>
+    <div style="display: flex; align-items: center; gap: var(--space-1);">
+      <span class="mini-label">BPM</span>
+      <input class="input" type="number" value="120" style="width: 52px; padding: 2px 6px; font-size: 12px;" />
+    </div>
+    <div style="display: flex; align-items: center; gap: var(--space-1); width: 130px;">
+      <span class="mini-label">Master</span>
+      <div class="range-wrap" style="width: 90px;"><div class="range-track"></div><input type="range" min="0" max="100" value="78" class="mini-range" style="width: 90px;" /></div>
+    </div>
+    <div style="margin-left: auto; display: flex; gap: var(--space-1);">
+      <button type="button" class="btn btn-ghost" style="padding: 4px 8px; font-size: 11px;">Save</button>
+      <button type="button" class="btn btn-ghost" style="padding: 4px 8px; font-size: 11px;">Load</button>
+    </div>
+  </div>
+
+  <sc-for list="{{ oscillators }}" as="osc" hint-placeholder-count="3">
+    <div class="osc-strip">
+      <div>
+        <div style="font-family: var(--font-heading); font-size: 13px; line-height: 1.2;">{{ osc.name }}</div>
+      </div>
+
+      <div class="mseg">
+        <div class="mseg-opt {{ osc.waves.sineCls }}"><svg width="16" height="10" viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 6 C3 1 5 1 7 6 C9 11 11 11 13 6 C15 1 17 1 19 6"/></svg></div>
+        <div class="mseg-opt {{ osc.waves.squareCls }}"><svg width="16" height="10" viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 9 L1 3 L7 3 L7 9 L13 9 L13 3 L19 3"/></svg></div>
+        <div class="mseg-opt {{ osc.waves.sawCls }}"><svg width="16" height="10" viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 9 L7 3 L7 9 L13 3 L13 9 L19 3"/></svg></div>
+      </div>
+
+      <div style="display: flex; gap: var(--space-3);">
+        <div>
+          <div class="mini-label">Pitch {{ osc.pitch }}</div>
+          <div class="range-wrap"><div class="range-track"></div><input type="range" min="-24" max="24" value="{{ osc.pitchVal }}" class="mini-range" /></div>
+        </div>
+        <div>
+          <div class="mini-label">Decay {{ osc.decay }}</div>
+          <div class="range-wrap"><div class="range-track"></div><input type="range" min="0" max="100" value="{{ osc.decayVal }}" class="mini-range" /></div>
+        </div>
+        <div>
+          <div class="mini-label">Vol {{ osc.volume }}</div>
+          <div class="range-wrap"><div class="range-track"></div><input type="range" min="0" max="100" value="{{ osc.volumeVal }}" class="mini-range" /></div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(16, 1fr); gap: 3px;">
+        <sc-for list="{{ osc.steps }}" as="s" hint-placeholder-count="16">
+          <button type="button" class="mstep {{ s.cls }}" aria-pressed="{{ s.on }}"></button>
+        </sc-for>
+      </div>
+    </div>
+  </sc-for>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const WAVES = ['Sine', 'Square', 'Saw'];
+
+function makeSteps(pattern) {
+  return pattern.map((on, i) => ({
+    on,
+    cls: [on ? 'on' : '', (i % 4 === 0) ? 'accent-beat' : ''].filter(Boolean).join(' ')
+  }));
+}
+
+function makeWaves(active) {
+  return {
+    sineCls: active === 'Sine' ? 'active' : '',
+    squareCls: active === 'Square' ? 'active' : '',
+    sawCls: active === 'Saw' ? 'active' : ''
+  };
+}
+
+class Component extends DCLogic {
+  renderVals() {
+    const kick   = [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0];
+    const snare  = [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,1,0];
+    const hat    = [1,0,1,0, 1,0,1,1, 1,0,1,0, 1,0,1,1];
+
+    const oscillators = [
+      { name: 'OSC 1', voice: 'KICK', waves: makeWaves('Sine'),
+        pitch: '-6', pitchVal: -6, decay: '62', decayVal: 62, volume: '90', volumeVal: 90,
+        steps: makeSteps(kick) },
+      { name: 'OSC 2', voice: 'SNARE', waves: makeWaves('Square'),
+        pitch: '0', pitchVal: 0, decay: '40', decayVal: 40, volume: '75', volumeVal: 75,
+        steps: makeSteps(snare) },
+      { name: 'OSC 3', voice: 'HI-HAT', waves: makeWaves('Saw'),
+        pitch: '+9', pitchVal: 9, decay: '18', decayVal: 18, volume: '60', volumeVal: 60,
+        steps: makeSteps(hat) },
+    ];
+
+    return { oscillators };
+  }
+}
+</script>
+</body>
+</html>

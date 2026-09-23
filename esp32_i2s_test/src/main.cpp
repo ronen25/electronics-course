@@ -3,16 +3,28 @@
 // Purpose: isolate whether the I2S -> amp -> speaker signal chain works at
 // all, independent of esp32_synth's complexity.
 //
-// Wiring (freshly rewired from scratch):
-//   LRC (word select) -> GPIO3
-//   BCLK (bit clock)  -> GPIO7
-//   DIN (data)        -> GPIO10
-//   SD  -> 3V3 directly (enable)
+// STATUS 2026-09-16: RESOLVED. The 2026-09-11 dead-silent result (see git
+// history for the full elimination log -- pin config, speaker, SD, GAIN,
+// BCLK/DIN, i2s_write() return codes were all individually verified good)
+// was concluded "most likely a defective amp module" at the time, but that
+// was wrong: the module works fine. Root cause was Vin -- it was wired to
+// the board's 3V3 rail, and while the MAX98357A's datasheet range (2.5-5.5V)
+// technically includes 3.3V, this module needs 5V in practice to actually
+// produce output. Confirmed by moving Vin from 3V3 to the board's 5V pin
+// with no other wiring changes: audio started working immediately.
+//
+// Wiring:
+//   LRC (word select) -> GPIO9, BCLK (bit clock) -> GPIO7, DIN (data) -> GPIO10
+//   SD  -> 3V3 directly (enable -- logic-level pin, distinct from Vin below;
+//          3V3 is fine here and NOT the thing that needed to change)
 //   GAIN -> not connected (9dB default)
 //   GND -> board GND
-//   Vin -> 3V3 directly
+//   Vin -> board 5V pin (NOT 3V3 -- see STATUS above)
 //   Speaker on the amp's output terminal.
-// None of these GPIOs are strapping pins (2/8/9) or the onboard LED (8).
+// None of these GPIOs are strapping pins (2/8/9) or the onboard LED (8) --
+// GPIO9 IS a strapping pin but only affects boot-mode selection before
+// setup() runs; esp32_synth already drives it continuously post-boot with
+// no documented issue.
 
 #include <Arduino.h>
 #include <driver/i2s.h>
@@ -20,7 +32,7 @@
 #define SAMPLE_RATE 20000
 #define TONE_HZ 440
 #define I2S_PORT I2S_NUM_0
-#define I2S_PIN_LRC 3
+#define I2S_PIN_LRC 9
 #define I2S_PIN_BCLK 7
 #define I2S_PIN_DOUT 10
 #define BLOCK_SAMPLES 128

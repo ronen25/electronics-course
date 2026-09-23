@@ -11,7 +11,10 @@
 //   Audio: I2S -> MAX98357A -> speaker
 //     LRC (word select) -> GPIO9, BCLK (bit clock) -> GPIO7, DIN (data) -> GPIO10
 //     Amp SD tied directly to 3V3 (enable, mono (L+R)/2 output); GAIN left
-//     floating (9dB, MAX98357A default); amp GND/Vin -> board GND/3V3.
+//     floating (9dB, MAX98357A default); amp GND -> board GND; amp Vin ->
+//     board 5V pin (NOT 3V3 -- this module needs 5V to actually produce
+//     output, even though 3.3V is within the MAX98357A's datasheet range;
+//     see esp32_i2s_test/src/main.cpp's STATUS note for how this was found).
 //     Samples are sent as 32-bit words (64x BCLK/LRCLK ratio) even though
 //     only ~16 bits of audio precision are used: the MAX98357A's automatic
 //     clock-ratio auto-detect is known to be unreliable at the 32x (16-bit)
